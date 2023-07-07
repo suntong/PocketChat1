@@ -57,7 +57,7 @@ func broadcaster() {
 	}
 }
 
-func countIdleTime(conn net.Conn, notIdleCh <-chan bool) {
+func countIdleTime(conn net.Conn, who string, notIdleCh <-chan bool) {
 	ticker := time.NewTicker(time.Second)
 	counter := 0
 	max := 20 // 20 seconds
@@ -66,7 +66,7 @@ func countIdleTime(conn net.Conn, notIdleCh <-chan bool) {
 		case <-ticker.C:
 			counter++
 			if counter == max {
-				msg := conn.RemoteAddr().String() + " idle too long. Kicked out."
+				msg := who + " idle too long. Kicked out."
 				messages <- msg
 				fmt.Fprintln(conn, msg) // Let to-be-closed client see this msg
 				ticker.Stop()
@@ -80,19 +80,24 @@ func countIdleTime(conn net.Conn, notIdleCh <-chan bool) {
 }
 
 func handleConn(conn net.Conn) {
+	input := bufio.NewScanner(conn)
+	var who string
+	fmt.Fprint(conn, "Input your name: ")
+	if input.Scan() {
+		who = input.Text()
+	}
+
 	ch := make(chan string) // outgoing client messages
 	go clientWriter(conn, ch)
 
-	who := conn.RemoteAddr().String()
 	ch <- "You are " + who
 	messages <- who + " has arrived"
 	entering <- ch
 	registeringAddress <- who
 
 	notIdleCh := make(chan bool)
-	go countIdleTime(conn, notIdleCh)
+	go countIdleTime(conn, who, notIdleCh)
 
-	input := bufio.NewScanner(conn)
 	for input.Scan() {
 		notIdleCh <- true
 		messages <- who + ": " + input.Text()
