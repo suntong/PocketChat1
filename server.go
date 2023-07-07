@@ -1,9 +1,3 @@
-// Copyright © 2016 Alan A. A. Donovan & Brian W. Kernighan.
-// License: https://creativecommons.org/licenses/by-nc-sa/4.0/
-
-// See page 254.
-//!+
-
 // Chat is a server that lets clients chat with each other.
 package main
 
@@ -12,19 +6,22 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"time"
 )
 
-//!+broadcaster
 type client chan<- string // an outgoing message channel
 
 var (
-	entering = make(chan client)
-	leaving  = make(chan client)
-	messages = make(chan string) // all incoming client messages
+	entering             = make(chan client)
+	leaving              = make(chan client)
+	messages             = make(chan string) // all incoming client messages
+	registeringAddress   = make(chan string)
+	unregisteringAddress = make(chan string)
 )
 
 func broadcaster() {
 	clients := make(map[client]bool) // all connected clients
+	addresses := make(map[string]bool)
 	for {
 		select {
 		case msg := <-messages:
@@ -40,13 +37,48 @@ func broadcaster() {
 		case cli := <-leaving:
 			delete(clients, cli)
 			close(cli)
+
+		case address := <-registeringAddress:
+			addresses[address] = true
+			allClients := "All clients:"
+			for addr := range addresses {
+				allClients = fmt.Sprintf("%s\n%s", allClients, addr)
+			}
+			go func() { messages <- allClients }() // Must call a new goroutine to avoid blocking
+		case address := <-unregisteringAddress:
+			delete(addresses, address)
+			allClients := "All clients:"
+			for addr := range addresses {
+				allClients = fmt.Sprintf("%s\n%s", allClients, addr)
+			}
+			go func() { messages <- allClients }() // Must call a new goroutine to avoid blocking
+		}
+
+	}
+}
+
+func countIdleTime(conn net.Conn, notIdleCh <-chan bool) {
+	ticker := time.NewTicker(time.Second)
+	counter := 0
+	max := 20 // 20 seconds
+	for {
+		select {
+		case <-ticker.C:
+			counter++
+			if counter == max {
+				msg := conn.RemoteAddr().String() + " idle too long. Kicked out."
+				messages <- msg
+				fmt.Fprintln(conn, msg) // Let to-be-closed client see this msg
+				ticker.Stop()
+				conn.Close()
+				return
+			}
+		case <-notIdleCh:
+			counter = 0
 		}
 	}
 }
 
-//!-broadcaster
-
-//!+handleConn
 func handleConn(conn net.Conn) {
 	ch := make(chan string) // outgoing client messages
 	go clientWriter(conn, ch)
@@ -55,15 +87,21 @@ func handleConn(conn net.Conn) {
 	ch <- "You are " + who
 	messages <- who + " has arrived"
 	entering <- ch
+	registeringAddress <- who
+
+	notIdleCh := make(chan bool)
+	go countIdleTime(conn, notIdleCh)
 
 	input := bufio.NewScanner(conn)
 	for input.Scan() {
+		notIdleCh <- true
 		messages <- who + ": " + input.Text()
 	}
 	// NOTE: ignoring potential errors from input.Err()
 
 	leaving <- ch
 	messages <- who + " has left"
+	unregisteringAddress <- who
 	conn.Close()
 }
 
@@ -73,9 +111,6 @@ func clientWriter(conn net.Conn, ch <-chan string) {
 	}
 }
 
-//!-handleConn
-
-//!+main
 func main() {
 	listener, err := net.Listen("tcp", "localhost:8000")
 	if err != nil {
@@ -92,5 +127,3 @@ func main() {
 		go handleConn(conn)
 	}
 }
-
-//!-main
